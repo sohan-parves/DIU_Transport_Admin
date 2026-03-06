@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "528658584038",
+    "project_id": "diu-transport-c2c76",
+    "storage_bucket": "diu-transport-c2c76.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:528658584038:android:f33797af3152197e698627",
+        "android_client_info": {
+          "package_name": "com.sohan.diutransportadmin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCMZOqODpNAqqAUz7DhQDUVlY6Chv0Nq4g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
