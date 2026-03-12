@@ -87,4 +87,5 @@ dependencies {
     // Excel (XLSX) support
     implementation("org.apache.poi:poi:5.2.5")
     implementation("org.apache.poi:poi-ooxml:5.2.5")
+    implementation("org.osmdroid:osmdroid-android:6.1.18")
 }
