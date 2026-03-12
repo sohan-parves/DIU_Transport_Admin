@@ -1,4 +1,7 @@
 package com.sohan.diutransportadmin
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.platform.LocalView
+
 
 import android.location.Geocoder
 import android.annotation.SuppressLint
@@ -66,7 +69,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-
+import androidx.compose.runtime.mutableIntStateOf
 // (keep only one of each)
 // (imports cleaned up below)
 // Remove duplicate imports
@@ -577,48 +580,45 @@ class MainActivity : ComponentActivity() {
     private val noticeDateState = mutableStateOf("")
 
     // Manual route road polyline admin UI state
+
     private val manualRouteNoState = mutableStateOf("")
-    private val manualRoutePolylineState = mutableStateOf("")
-    private val manualRouteStopNamesState = mutableStateOf("")
-    private val manualRouteUseExactDrawnRoadState = mutableStateOf(false)
-    private val manualRouteGenerateDenseRoadPointsState = mutableStateOf(true)
-    private val mapEditorVisibleState = mutableStateOf(false)
-    private fun parseManualPolylineInput(raw: String): List<Map<String, Any>> {
-        val normalized = raw
-            .replace("\r", "\n")
-            .replace(";", "\n")
+    private val stopEditorVisibleState = mutableStateOf(false)
+    private val roadEditorVisibleState = mutableStateOf(false)
+    private val manualRouteStopsOnlyState = mutableStateOf("")
+    private val manualRouteRoadOnlyState = mutableStateOf("")
+    private val selectedRoadPointIndexState = mutableIntStateOf(-1)
+    private val selectedRoadInsertAfterIndexState = mutableIntStateOf(-1)
+    private val isGeneratingRoadPolylineState = mutableStateOf(false)
 
-        val out = mutableListOf<Map<String, Any>>()
 
-        normalized.lineSequence()
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .forEach { line ->
-                val parts = line.split(",")
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-                if (parts.size >= 2) {
-                    val lat = parts[0].toDoubleOrNull()
-                    val lng = parts[1].toDoubleOrNull()
-                    if (lat != null && lng != null) {
-                        out.add(mapOf("lat" to lat, "lng" to lng))
-                    }
-                }
-            }
-
-        return out
-    }
-
-    private fun parseManualStopNames(raw: String): List<String> {
+    private fun parseManualStopsOnly(raw: String): List<Map<String, Any>> {
         return raw
             .replace("\r", "\n")
-            .replace("<>", "\n")
-            .replace(";", "\n")
             .lineSequence()
             .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .mapIndexedNotNull { index, line ->
+                val parts = line.split("|").map { it.trim() }
+                if (parts.size < 2) return@mapIndexedNotNull null
+
+                val name = parts[0]
+                val latLng = parts[1].split(",").map { it.trim() }
+                val lat = latLng.getOrNull(0)?.toDoubleOrNull()
+                val lng = latLng.getOrNull(1)?.toDoubleOrNull()
+
+                if (name.isBlank() || lat == null || lng == null) return@mapIndexedNotNull null
+
+                mapOf(
+                    "name" to name,
+                    "seq" to index,
+                    "lat" to lat,
+                    "lng" to lng
+                )
+            }
             .toList()
     }
-    private fun parseManualPolylineGeoPoints(raw: String): List<GeoPoint> {
+
+    private fun parseManualRoadOnly(raw: String): List<GeoPoint> {
         return raw
             .replace("\r", "\n")
             .replace(";", "\n")
@@ -633,196 +633,125 @@ class MainActivity : ComponentActivity() {
             }
             .toList()
     }
+    private fun parseStopsOnlyEditorInput(raw: String): MutableList<Pair<String, GeoPoint>> {
+        return raw
+            .replace("\r", "\n")
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .mapNotNull { line ->
+                val parts = line.split("|").map { it.trim() }
+                if (parts.size < 2) return@mapNotNull null
+                val name = parts[0]
+                val latLng = parts[1].split(",").map { it.trim() }
+                val lat = latLng.getOrNull(0)?.toDoubleOrNull()
+                val lng = latLng.getOrNull(1)?.toDoubleOrNull()
+                if (name.isBlank() || lat == null || lng == null) return@mapNotNull null
+                name to GeoPoint(lat, lng)
+            }
+            .toMutableList()
+    }
 
+    private fun parseRoadOnlyEditorInput(raw: String): MutableList<GeoPoint> {
+        return raw
+            .replace("\r", "\n")
+            .replace(";", "\n")
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .mapNotNull { line ->
+                val parts = line.split(",").map { it.trim() }
+                val lat = parts.getOrNull(0)?.toDoubleOrNull()
+                val lng = parts.getOrNull(1)?.toDoubleOrNull()
+                if (lat != null && lng != null) GeoPoint(lat, lng) else null
+            }
+            .toMutableList()
+    }
 
-    private fun saveManualRouteRoadPolyline(
+    private fun saveSeparatedRouteMapData(
         routeNoRaw: String,
-        polylineRaw: String,
-        useExactDrawnRoad: Boolean,
-        generateDenseRoadPoints: Boolean
+        stopsRaw: String,
+        roadRaw: String
     ) {
         val routeNo = routeNoRaw.trim()
-        val anchorPolyline = parseManualPolylineInput(polylineRaw)
-        val anchorPoints = parseManualPolylineGeoPoints(polylineRaw)
-        val stopNames = parseManualStopNames(manualRouteStopNamesState.value)
+        val parsedStops = parseManualStopsOnly(stopsRaw)
+        val roadPoints = parseManualRoadOnly(roadRaw)
 
         if (!isValidRouteNo(routeNo)) {
             status.value = "Invalid route number"
             return
         }
-        if (anchorPolyline.size < 2 || anchorPoints.size < 2) {
-            status.value = "Need at least 2 lat,lng points"
+
+        if (parsedStops.isEmpty()) {
+            status.value = "Need at least 1 stop marker"
             return
         }
 
-        processingPreviewTitle.value = "Route $routeNo preview"
-        processingPreviewBody.value = buildString {
-            append("Selected points: ${anchorPoints.size}\n")
-            append("Stop names: ${stopNames.size}\n")
-            append("Exact drawn mode: ${if (useExactDrawnRoad) "ON" else "OFF"}\n")
-            append("Dense road generation: ${if (generateDenseRoadPoints) "ON" else "OFF"}\n")
-            append("First point: ${anchorPoints.firstOrNull()?.latitude}, ${anchorPoints.firstOrNull()?.longitude}\n")
-            append("Last point: ${anchorPoints.lastOrNull()?.latitude}, ${anchorPoints.lastOrNull()?.longitude}")
+        if (roadPoints.size < 2) {
+            status.value = "Need at least 2 road points"
+            return
         }
 
         isLoading.value = true
-        progressPercent.value = 5
-        progressLabel.value = when {
-            useExactDrawnRoad && generateDenseRoadPoints -> "Generating dense road points from selected serial points..."
-            useExactDrawnRoad -> "Preparing exact drawn road polyline..."
-            else -> "Snapping selected points to roads..."
-        }
-        status.value = when {
-            useExactDrawnRoad && generateDenseRoadPoints -> "Generating dense road polyline for $routeNo..."
-            useExactDrawnRoad -> "Preparing exact road polyline for $routeNo..."
-            else -> "Preparing road polyline for $routeNo..."
+        progressPercent.value = 20
+        progressLabel.value = "Preparing raw stop markers and road polyline..."
+        status.value = "Preparing raw separated route map data for $routeNo..."
+
+        val rawRoadPolyline = roadPoints.map { p ->
+            mapOf("lat" to p.latitude, "lng" to p.longitude)
         }
 
-        lifecycleScope.launch {
-            try {
-                progressPercent.value = 20
-                progressLabel.value = "Generating Google-Maps-like road-following polyline from saved anchor coordinates..."
+        val stopNames = parsedStops.map { (it["name"] as? String).orEmpty() }
+        val stopNamesCount = stopNames.count { it.isNotBlank() }
 
-                val routedPoints = when {
-                    useExactDrawnRoad && generateDenseRoadPoints -> {
-                        kotlinx.coroutines.withTimeoutOrNull(15000L) {
-                            buildBestRoadPolylineFromAnchors(anchorPoints)
-                        } ?: anchorPoints
-                    }
-                    useExactDrawnRoad -> anchorPoints
-                    else -> {
-                        kotlinx.coroutines.withTimeoutOrNull(15000L) {
-                            buildBestRoadPolylineFromAnchors(anchorPoints)
-                        } ?: anchorPoints
-                    }
-                }
-                val routedPolyline = routedPoints.map { p ->
-                    mapOf("lat" to p.latitude, "lng" to p.longitude)
-                }
-                processingPreviewBody.value = buildString {
-                    append("Selected anchor points: ${anchorPoints.size}\n")
-                    append("Generated road points: ${routedPoints.size}\n")
-                    append("Stop names: ${stopNames.size}\n")
-                    append("Mode: ")
-                    append(
-                        when {
-                            useExactDrawnRoad && generateDenseRoadPoints -> "Exact + Dense Road"
-                            useExactDrawnRoad -> "Exact Drawn"
-                            else -> "Auto Road Following"
-                        }
-                    )
-                    append("\nSave behaviour: point-to-point anchor na, road polyline save hobe")
-                }
-                if (routedPoints == anchorPoints && !useExactDrawnRoad) {
-                    processingPreviewTitle.value = "Fallback preview"
-                    processingPreviewBody.value = buildString {
-                        append("Full road generation could not be completed.\n")
-                        append("The app tried direct routing + midpoint retry.\n")
-                        append("Selected points: ${anchorPoints.size}\n")
-                        append("Saved points: ${routedPoints.size}\n")
-                        append("Add more road-side anchor points for Google-Maps-like road highlight.")
-                    }
-                }
-                progressPercent.value = 70
-                progressLabel.value = "Generated ${routedPoints.size} road points. Saving fast to Firestore..."
+        progressPercent.value = 80
+        progressLabel.value = "Uploading raw stop map + road map..."
 
-                if (routedPoints.size < 2) {
-                    isLoading.value = false
-                    progressPercent.value = 0
-                    progressLabel.value = ""
-                    processingPreviewTitle.value = "Processing failed"
-                    processingPreviewBody.value = "Could not prepare enough points to save this route. Add more points in serial order."
-                    status.value = "FAILED ❌ Could not prepare enough points to save this route. Add more points in serial order."
-                    return@launch
-                }
-
-                val exactRouteStops = if (stopNames.isNotEmpty()) {
-                    anchorPoints.take(stopNames.size).mapIndexed { index, point ->
-                        mapOf(
-                            "name" to stopNames[index],
-                            "seq" to index,
-                            "lat" to point.latitude,
-                            "lng" to point.longitude
-                        )
-                    }
-                } else {
-                    emptyList()
-                }
-
-                progressPercent.value = 85
-                progressLabel.value = "Saving route road polyline..."
-                status.value = "Updating $routeNo road polyline..."
-
-                progressPercent.value = 95
-                progressLabel.value = "Writing selected road points to Firestore..."
-
-                val mapDoc = routeMapDoc(routeNo)
-                val payload = linkedMapOf<String, Any>(
-                    "routeNo" to routeNo,
-                    "routeRoadPolyline" to routedPolyline,
-                    "routeRoadPolylineCount" to routedPolyline.size,
-                    "routeRoadPolylineAnchors" to anchorPolyline,
-                    "routeRoadPolylineAnchorCount" to anchorPolyline.size,
-                    "mapDataNote" to when {
-                        useExactDrawnRoad && generateDenseRoadPoints -> "Manual selected serial points were expanded into dense road-following polyline and exact stop markers set from admin editor."
-                        useExactDrawnRoad -> "Manual exact drawn road polyline and exact stop markers set from admin editor."
-                        else -> "Manual verified road polyline and exact stop markers set from admin editor."
-                    },
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                if (stopNames.isNotEmpty()) {
-                    payload["routeStopNames"] = stopNames
-                    payload["routeStops"] = exactRouteStops
-                    payload["routeStopsCount"] = exactRouteStops.size
-                }
-
-                mapDoc.set(payload, SetOptions.merge())
-                    .addOnSuccessListener {
-                        isLoading.value = false
-                        progressPercent.value = 0
-                        progressLabel.value = ""
-                        processingPreviewTitle.value = ""
-                        processingPreviewBody.value = ""
-                        status.value = when {
-                            useExactDrawnRoad && generateDenseRoadPoints ->
-                                "DONE ✅ Saved fast road-following polyline for $routeNo (${anchorPolyline.size} selected points → ${routedPolyline.size} generated road points, ${exactRouteStops.size} stop markers)"
-                            useExactDrawnRoad ->
-                                "DONE ✅ Saved exact drawn road map data for $routeNo (${anchorPolyline.size} drawn points, ${exactRouteStops.size} stop markers)"
-                            else ->
-                                "DONE ✅ Saved separate map data for $routeNo (${anchorPolyline.size} selected points, ${routedPolyline.size} road points, ${exactRouteStops.size} stop markers)"
-                        }
-
-                        manualRouteNoState.value = ""
-                        manualRoutePolylineState.value = ""
-                        manualRouteStopNamesState.value = ""
-                        manualRouteUseExactDrawnRoadState.value = false
-                        manualRouteGenerateDenseRoadPointsState.value = true
-                        mapEditorVisibleState.value = false
-
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Saved separate map data for $routeNo",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                    .addOnFailureListener { e ->
-                        isLoading.value = false
-                        progressPercent.value = 0
-                        progressLabel.value = ""
-                        processingPreviewTitle.value = "Save failed"
-                        processingPreviewBody.value = "${e.message.orEmpty()}"
-                        status.value = "FAILED ❌ ${e.message}"
-                    }
-            } catch (e: Exception) {
+        val mapDoc = routeMapDoc(routeNo)
+        val payload = linkedMapOf<String, Any>(
+            "routeNo" to routeNo,
+            "routeStops" to parsedStops,
+            "routeStopsCount" to parsedStops.size,
+            "routeStopNames" to stopNames,
+            "routeStopNamesCount" to stopNamesCount,
+            "routeRoadPolylineAnchors" to rawRoadPolyline,
+            "routeRoadPolylineAnchorCount" to rawRoadPolyline.size,
+            "routeRoadPolyline" to rawRoadPolyline,
+            "routeRoadPolylineCount" to rawRoadPolyline.size,
+            "mapDataSource" to "raw_admin_editor",
+            "mapDataFormat" to "separated_stop_and_raw_polyline",
+            "mapDataGenerator" to "admin_auto_snapped_polyline",
+            "mapDataNote" to "Stop markers, stop names, stop-name count, and raw road polyline were saved directly from admin editor without snapping or changing the road polyline.",
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        mapDoc.set(payload, SetOptions.merge())
+            .addOnSuccessListener {
                 isLoading.value = false
                 progressPercent.value = 0
                 progressLabel.value = ""
-                processingPreviewTitle.value = "Processing failed"
-                processingPreviewBody.value = "${e.message.orEmpty()}"
+                status.value =
+                    "DONE ✅ Saved raw separated stop map + road map for $routeNo (${parsedStops.size} stops, ${stopNamesCount} stop names, ${rawRoadPolyline.size} road points)"
+
+                manualRouteNoState.value = ""
+                manualRouteStopsOnlyState.value = ""
+                manualRouteRoadOnlyState.value = ""
+                stopEditorVisibleState.value = false
+                roadEditorVisibleState.value = false
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Saved separated stop map + road map for $routeNo",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            .addOnFailureListener { e ->
+                isLoading.value = false
+                progressPercent.value = 0
+                progressLabel.value = ""
                 status.value = "FAILED ❌ ${e.message}"
             }
-        }
     }
+
 
     private val pickFiles = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -898,34 +827,89 @@ class MainActivity : ComponentActivity() {
                     onCleanupNotices = { cleanupOldNotices() },
                     manualRouteNo = manualRouteNoState.value,
                     onManualRouteNoChange = { manualRouteNoState.value = it },
-                    manualRoutePolyline = manualRoutePolylineState.value,
-                    onManualRoutePolylineChange = { manualRoutePolylineState.value = it },
-                    manualRouteStopNames = manualRouteStopNamesState.value,
-                    onManualRouteStopNamesChange = { manualRouteStopNamesState.value = it },
-                    manualRouteUseExactDrawnRoad = manualRouteUseExactDrawnRoadState.value,
-                    onManualRouteUseExactDrawnRoadChange = { manualRouteUseExactDrawnRoadState.value = it },
-                    manualRouteGenerateDenseRoadPoints = manualRouteGenerateDenseRoadPointsState.value,
-                    onManualRouteGenerateDenseRoadPointsChange = { manualRouteGenerateDenseRoadPointsState.value = it },
-                    onOpenMapEditor = { mapEditorVisibleState.value = true },
-                    onSaveManualRoutePolyline = {
-                        saveManualRouteRoadPolyline(
-                            manualRouteNoState.value,
-                            manualRoutePolylineState.value,
-                            manualRouteUseExactDrawnRoadState.value,
-                            manualRouteGenerateDenseRoadPointsState.value
+                    manualRouteStopsOnly = manualRouteStopsOnlyState.value,
+                    onManualRouteStopsOnlyChange = { manualRouteStopsOnlyState.value = it },
+                    manualRouteRoadOnly = manualRouteRoadOnlyState.value,
+                    onManualRouteRoadOnlyChange = { manualRouteRoadOnlyState.value = it },
+                    onOpenStopMapEditor = { stopEditorVisibleState.value = true },
+                    onOpenRoadMapEditor = { roadEditorVisibleState.value = true },
+                    showStopMapEditor = stopEditorVisibleState.value,
+                    showRoadMapEditor = roadEditorVisibleState.value,
+                    onDismissStopMapEditor = { stopEditorVisibleState.value = false },
+                    onDismissRoadMapEditor = { roadEditorVisibleState.value = false },
+                    onSaveSeparatedRouteMapData = {
+                        saveSeparatedRouteMapData(
+                            routeNoRaw = manualRouteNoState.value,
+                            stopsRaw = manualRouteStopsOnlyState.value,
+                            roadRaw = manualRouteRoadOnlyState.value
                         )
                     },
-                    onSaveManualRoutePolylineDirect = { updatedPolyline ->
-                        manualRoutePolylineState.value = updatedPolyline
-                        saveManualRouteRoadPolyline(
-                            manualRouteNoState.value,
-                            updatedPolyline,
-                            manualRouteUseExactDrawnRoadState.value,
-                            manualRouteGenerateDenseRoadPointsState.value
-                        )
+                    isGeneratingRoadPolyline = isGeneratingRoadPolylineState.value,
+                    onAutoGenerateRoadPolyline = {
+                        val routeNo = manualRouteNoState.value.trim()
+                        val rawRoad = manualRouteRoadOnlyState.value
+                        val rawStops = manualRouteStopsOnlyState.value
+
+                        val anchorPoints = parseRoadOnlyEditorInput(rawRoad)
+                        val stopPoints = parseStopsOnlyEditorInput(rawStops).map { it.second }
+                        val sourcePoints = if (anchorPoints.size >= 2) anchorPoints else stopPoints
+
+                        if (routeNo.isBlank()) {
+                            status.value = "Route No required before generating road polyline"
+                            return@AdminScreen
+                        }
+
+                        if (sourcePoints.size < 2) {
+                            status.value = "Need at least 2 anchor points or 2 stop points to generate road polyline"
+                            return@AdminScreen
+                        }
+
+                        isGeneratingRoadPolylineState.value = true
+                        isLoading.value = true
+                        progressPercent.value = 5
+                        progressLabel.value = "Preparing anchor points..."
+                        status.value = "Generating Google Maps style snapped road polyline for $routeNo..."
+
+                        lifecycleScope.launch {
+                            try {
+                                progressPercent.value = 25
+                                progressLabel.value = "Snapping to nearest road..."
+
+                                val snapped = snapPolylineToRoadForAdmin(sourcePoints)
+
+                                if (snapped.size < 2) {
+                                    isGeneratingRoadPolylineState.value = false
+                                    isLoading.value = false
+                                    progressPercent.value = 0
+                                    progressLabel.value = ""
+                                    status.value = "FAILED ❌ Could not generate road-following polyline"
+                                    return@launch
+                                }
+
+                                progressPercent.value = 80
+                                progressLabel.value = "Auto filling road points..."
+
+                                manualRouteRoadOnlyState.value = snapped.joinToString("\n") {
+                                    "${it.latitude},${it.longitude}"
+                                }
+
+                                selectedRoadPointIndexState.intValue = -1
+                                selectedRoadInsertAfterIndexState.intValue = -1
+
+                                isGeneratingRoadPolylineState.value = false
+                                isLoading.value = false
+                                progressPercent.value = 0
+                                progressLabel.value = ""
+                                status.value = "DONE ✅ Generated snapped road polyline for $routeNo (${snapped.size} points)"
+                            } catch (e: Exception) {
+                                isGeneratingRoadPolylineState.value = false
+                                isLoading.value = false
+                                progressPercent.value = 0
+                                progressLabel.value = ""
+                                status.value = "FAILED ❌ ${e.message}"
+                            }
+                        }
                     },
-                    showMapEditor = mapEditorVisibleState.value,
-                    onDismissMapEditor = { mapEditorVisibleState.value = false },
                     noticeTitle = noticeTitleState.value,
                     onNoticeTitleChange = { noticeTitleState.value = it },
                     noticeDate = noticeDateState.value,
@@ -1096,7 +1080,7 @@ class MainActivity : ComponentActivity() {
 
                 for (i in 1 until input.lastIndex) {
                     val current = input[i]
-                    if (distanceMeters(lastKept, current) >= 25f) {
+                    if (distanceMeters(lastKept, current) >= 8f) {
                         simplified.add(current)
                         lastKept = current
                     }
@@ -1667,7 +1651,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun AdminScreen(
     selectedFileName: String,
@@ -1684,19 +1668,19 @@ private fun AdminScreen(
     onCleanupNotices: () -> Unit,
     manualRouteNo: String,
     onManualRouteNoChange: (String) -> Unit,
-    manualRoutePolyline: String,
-    onManualRoutePolylineChange: (String) -> Unit,
-    manualRouteStopNames: String,
-    onManualRouteStopNamesChange: (String) -> Unit,
-    manualRouteUseExactDrawnRoad: Boolean,
-    onManualRouteUseExactDrawnRoadChange: (Boolean) -> Unit,
-    manualRouteGenerateDenseRoadPoints: Boolean,
-    onManualRouteGenerateDenseRoadPointsChange: (Boolean) -> Unit,
-    onOpenMapEditor: () -> Unit,
-    onSaveManualRoutePolyline: () -> Unit,
-    onSaveManualRoutePolylineDirect: (String) -> Unit,
-    showMapEditor: Boolean,
-    onDismissMapEditor: () -> Unit,
+    manualRouteStopsOnly: String,
+    onManualRouteStopsOnlyChange: (String) -> Unit,
+    manualRouteRoadOnly: String,
+    onManualRouteRoadOnlyChange: (String) -> Unit,
+    onOpenStopMapEditor: () -> Unit,
+    onOpenRoadMapEditor: () -> Unit,
+    showStopMapEditor: Boolean,
+    showRoadMapEditor: Boolean,
+    onDismissStopMapEditor: () -> Unit,
+    onDismissRoadMapEditor: () -> Unit,
+    onSaveSeparatedRouteMapData: () -> Unit,
+    isGeneratingRoadPolyline: Boolean,
+    onAutoGenerateRoadPolyline: () -> Unit,
     noticeTitle: String,
     onNoticeTitleChange: (String) -> Unit,
     noticeDate: String,
@@ -1780,7 +1764,7 @@ private fun AdminScreen(
                         Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Manual Route Road Polyline", style = MaterialTheme.typography.titleMedium)
+                        Text("Separated Route Map Editor", style = MaterialTheme.typography.titleMedium)
 
                         OutlinedTextField(
                             value = manualRouteNo,
@@ -1791,110 +1775,93 @@ private fun AdminScreen(
                         )
 
                         OutlinedTextField(
-                            value = manualRouteStopNames,
-                            onValueChange = onManualRouteStopNamesChange,
-                            modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Stop names (one per line or <> separated)") },
+                            value = manualRouteStopsOnly,
+                            onValueChange = onManualRouteStopsOnlyChange,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp),
+                            label = { Text("Stops only (Name|lat,lng)") },
                             placeholder = {
                                 Text(
-                                    "Sony Cinema Hall\nGudaraghat\nBeribadh\nEastern Housing"
+                                    "Daffodil Smart City|23.8749776,90.3228843\n" +
+                                        "Kumkumari|23.88240205790201,90.3100423395869"
                                 )
                             },
-                            minLines = 4
+                            maxLines = 100
                         )
 
                         OutlinedTextField(
-                            value = manualRoutePolyline,
-                            onValueChange = onManualRoutePolylineChange,
-                            modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Paste lat,lng points") },
+                            value = manualRouteRoadOnly,
+                            onValueChange = onManualRouteRoadOnlyChange,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp),
+                            label = { Text("Road points only (lat,lng)") },
                             placeholder = {
                                 Text(
-                                    "23.8248157,90.3437695\n23.8253000,90.3441000\n23.8260000,90.3450000"
+                                    "23.8749776,90.3228843\n" +
+                                        "23.88240205790201,90.3100423395869"
                                 )
                             },
-                            minLines = 6
+                            maxLines = 100
                         )
 
                         Text(
-                            "Road hishebe upload korte chaile default vabe Generate dense road points ON rakhun. Tahole selected serial point-gulor moddhe road-following polyline generate hoye upload hobe.",
+                            "Stop marker ar road polyline ekhon fully separate. Open Stop Map diye stop add/edit korben, Open Road Map diye road point add/edit korben.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    "Use exact drawn road points",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    "On thakle app auto-snap korbe na. Apni map e je serial point draw korben, oi points-e final road polyline save hobe.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = manualRouteUseExactDrawnRoad,
-                                onCheckedChange = onManualRouteUseExactDrawnRoadChange
-                            )
-                        }
+                        HorizontalDivider()
+
+                        Text(
+                            "Separated Editors",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    "Generate dense road points",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    "On thakle selected Point 1 → Point 2 → Point 3 serial order dhore road-following onek gulo intermediate point generate hobe. Straight line thakbe na.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            OutlinedButton(
+                                onClick = onOpenStopMapEditor,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Open Stop Map")
                             }
-                            Switch(
-                                checked = manualRouteGenerateDenseRoadPoints,
-                                onCheckedChange = onManualRouteGenerateDenseRoadPointsChange
-                            )
+
+                            OutlinedButton(
+                                onClick = onOpenRoadMapEditor,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Open Road Map")
+                            }
                         }
-
-
                         Button(
-                            onClick = onOpenMapEditor,
-                            enabled = !isLoading && manualRouteNo.trim().isNotEmpty(),
+                            onClick = onAutoGenerateRoadPolyline,
+                            enabled = !isLoading && !isGeneratingRoadPolyline,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Open In-App Map Draw Editor")
+                            Text(
+                                if (isGeneratingRoadPolyline)
+                                    "Generating Road Polyline..."
+                                else
+                                    "Auto Generate Road Polyline"
+                            )
                         }
 
                         Text(
-                            when {
-                                manualRouteUseExactDrawnRoad && manualRouteGenerateDenseRoadPoints ->
-                                    "Tip: Exact drawn on thakleo dense generation on hole selected point-gulor moddhe road-following onek gulo point generate hobe."
-                                manualRouteUseExactDrawnRoad ->
-                                    "Tip: Exact drawn mode on thakle apni je path draw korben, oi path-i save hobe. Maximum control paben, kintu point beshi dite hobe."
-                                else ->
-                                    "Tip: Eta recommended upload mode. Road-er upor serial point din, save korle app road-following polyline generate kore upload korbe."
-                            },
+                            "Road points only box a jodi 2+ anchor point thake tahole oi gula use kore snapped road polyline generate hobe. Nahole stop point gula theke auto road polyline generate hobe.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        // --- End enhancement ---
 
                         Button(
-                            onClick = onSaveManualRoutePolyline,
-                            enabled = !isLoading && manualRouteNo.trim().isNotEmpty() && manualRoutePolyline.trim().isNotEmpty(),
+                            onClick = onSaveSeparatedRouteMapData,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Save Route Road Polyline")
+                            Text("Save Separated Stop + Road Map")
                         }
                     }
                 }
@@ -1942,10 +1909,12 @@ private fun AdminScreen(
                         OutlinedTextField(
                             value = noticeBody,
                             onValueChange = onNoticeBodyChange,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(160.dp),
                             label = { Text("Notice text (Bangla)") },
                             placeholder = { Text("যেমন: আজ বাস ১৫ মিনিট লেট…") },
-                            minLines = 4
+                            maxLines = 100
                         )
 
                         Button(
@@ -1984,10 +1953,12 @@ private fun AdminScreen(
                         OutlinedTextField(
                             value = body,
                             onValueChange = { body = it },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(140.dp),
                             label = { Text("Message") },
                             placeholder = { Text("Write message for users…") },
-                            minLines = 3
+                            maxLines = 100
                         )
 
                         Row(
@@ -2094,8 +2065,8 @@ private fun AdminScreen(
                                     modifier = Modifier.weight(1f)
                                 ) {
                                     Column(
-                                        modifier = Modifier.padding(14.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
                                             text = processingPreviewTitle.ifBlank { "Live preview" },
@@ -2115,334 +2086,1011 @@ private fun AdminScreen(
                 }
             }
 
-            if (showMapEditor) {
-                ManualRouteMapEditorDialog(
+            if (showStopMapEditor) {
+                SeparateStopMapEditorDialog(
+                    initialStopsRaw = manualRouteStopsOnly,
+                    onDismiss = onDismissStopMapEditor,
+                    onSave = { updatedStopsRaw: String ->
+                        onManualRouteStopsOnlyChange(updatedStopsRaw)
+                        onDismissStopMapEditor()
+                    }
+                )
+            }
 
-                    initialPolylineText = manualRoutePolyline,
-                    initialStopNamesText = manualRouteStopNames,
-                    onDismiss = onDismissMapEditor,
-                    onApply = { _, _ ->
-                        // Apply updates only local preview inside dialog; do not close or sync parent yet.
-                    },
-                    onSaveDirect = { updatedPolyline, updatedStopNames ->
-                        onManualRoutePolylineChange(updatedPolyline)
-                        onManualRouteStopNamesChange(updatedStopNames)
-                        onDismissMapEditor()
-                        onSaveManualRoutePolylineDirect(updatedPolyline)
-                    },
-                    onCloseWithState = { updatedPolyline, updatedStopNames ->
-                        onManualRoutePolylineChange(updatedPolyline)
-                        onManualRouteStopNamesChange(updatedStopNames)
-                        onDismissMapEditor()
+            if (showRoadMapEditor) {
+                SeparateRoadMapEditorDialog(
+                    initialRoadRaw = manualRouteRoadOnly,
+                    onDismiss = onDismissRoadMapEditor,
+                    onSave = { updatedRoadRaw: String ->
+                        onManualRouteRoadOnlyChange(updatedRoadRaw)
+                        onDismissRoadMapEditor()
                     }
                 )
             }
         }
     }
 }
+private fun parseStopsOnlyEditorInputForDialog(raw: String): MutableList<Pair<String, GeoPoint>> {
+    return raw
+        .replace("\r", "\n")
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .mapNotNull { line ->
+            val parts = line.split("|").map { it.trim() }
+            if (parts.size < 2) return@mapNotNull null
+            val name = parts[0]
+            val latLng = parts[1].split(",").map { it.trim() }
+            val lat = latLng.getOrNull(0)?.toDoubleOrNull()
+            val lng = latLng.getOrNull(1)?.toDoubleOrNull()
+            if (name.isBlank() || lat == null || lng == null) return@mapNotNull null
+            name to GeoPoint(lat, lng)
+        }
+        .toMutableList()
+}
 
-@SuppressLint("SetJavaScriptEnabled")
+private fun parseRoadOnlyEditorInputForDialog(raw: String): MutableList<GeoPoint> {
+    return raw
+        .replace("\r", "\n")
+        .replace(";", "\n")
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .mapNotNull { line ->
+            val parts = line.split(",").map { it.trim() }
+            val lat = parts.getOrNull(0)?.toDoubleOrNull()
+            val lng = parts.getOrNull(1)?.toDoubleOrNull()
+            if (lat != null && lng != null) GeoPoint(lat, lng) else null
+        }
+        .toMutableList()
+}
+
 @Composable
-private fun ManualRouteMapEditorDialog(
-    initialPolylineText: String,
-    initialStopNamesText: String,
+private fun SeparateStopMapEditorDialog(
+    initialStopsRaw: String,
     onDismiss: () -> Unit,
-    onApply: (String, String) -> Unit,
-    onSaveDirect: (String, String) -> Unit,
-    onCloseWithState: (String, String) -> Unit
+    onSave: (String) -> Unit
 ) {
-    var editorText by rememberSaveable { mutableStateOf(initialPolylineText.trim()) }
-    var stopNamesText by rememberSaveable { mutableStateOf(initialStopNamesText.trim()) }
-    var searchCoordinateText by rememberSaveable { mutableStateOf("") }
-    var mapJumpTarget by remember { mutableStateOf<GeoPoint?>(null) }
-    var searchedMarkerPoint by remember { mutableStateOf<GeoPoint?>(null) }
-    var mapSearchError by remember { mutableStateOf("") }
-    val keyboardController = LocalSoftwareKeyboardController.current
-    LaunchedEffect(Unit) {
-        keyboardController?.show()
-    }
-    var pointCount by remember(editorText) {
+    val context = LocalContext.current
+    val stops: MutableList<Pair<String, GeoPoint>> = remember(initialStopsRaw) { parseStopsOnlyEditorInputForDialog(initialStopsRaw) }
+    var selectedIndex by remember { mutableStateOf(-1) }
+    var pendingName by remember { mutableStateOf("") }
+    var stopNamesBulkText by remember {
         mutableStateOf(
-            editorText.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.count()
+            stops.joinToString("\n") { it.first }.ifBlank { "" }
         )
     }
-
-    fun recountPoints(text: String): Int {
-        return text.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.count()
+    var selectedNameIndex by remember { mutableStateOf(0) }
+    var manualLatLngText by remember { mutableStateOf("") }
+    var bulkLatLngText by remember {
+        mutableStateOf(
+            stops.joinToString("\n") { "${it.second.latitude},${it.second.longitude}" }
+        )
     }
+    var refreshTick by remember { mutableStateOf(0) }
 
-    fun undoLastPoint() {
-        val lines = editorText.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
-        val updated = lines.dropLast(1).joinToString("\n")
-        editorText = updated
-        pointCount = recountPoints(updated)
-        stopNamesText = syncStopNamesWithPointCount(stopNamesText, pointCount)
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Stop Map Editor",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(onClick = onDismiss) { Text("Close") }
+                    Button(
+                        onClick = {
+                            val out = stops.joinToString("\n") { (name, point) ->
+                                "$name|${point.latitude},${point.longitude}"
+                            }
+                            onSave(out)
+                        }
+                    ) { Text("Save") }
+                }
+
+                Text(
+                    text = "Onek gula stop name age thekei boshan. Tarpor selected name choose kore map e tap korle oi naam diye stop add hobe. Existing marker tap kore select kore abar tap korle oi marker update hobe.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                val bulkNames = remember(stopNamesBulkText) {
+                    stopNamesBulkText
+                        .replace("\r", "\n")
+                        .lineSequence()
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .toList()
+                }
+
+                fun parseManualGeoPoint(raw: String): GeoPoint? {
+                    val cleaned = raw.trim().removePrefix("(").removeSuffix(")")
+                    val parts = cleaned.split(",").map { it.trim() }
+                    if (parts.size < 2) return null
+                    val lat = parts[0].toDoubleOrNull() ?: return null
+                    val lng = parts[1].toDoubleOrNull() ?: return null
+                    if (lat !in -90.0..90.0 || lng !in -180.0..180.0) return null
+                    return GeoPoint(lat, lng)
+                }
+
+                fun parseBulkGeoPoints(raw: String): List<GeoPoint> {
+                    return raw
+                        .replace("\r", "\n")
+                        .lineSequence()
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .mapNotNull { parseManualGeoPoint(it) }
+                        .toList()
+                }
+
+                OutlinedTextField(
+                    value = stopNamesBulkText,
+                    onValueChange = {
+                        stopNamesBulkText = it
+                        val maxIndex = (
+                            it.replace("\r", "\n")
+                                .lineSequence()
+                                .map { line -> line.trim() }
+                                .filter { line -> line.isNotBlank() }
+                                .count() - 1
+                            ).coerceAtLeast(0)
+                        if (selectedNameIndex > maxIndex) selectedNameIndex = maxIndex
+                        if (bulkNames.isNotEmpty()) {
+                            pendingName = bulkNames.getOrElse(selectedNameIndex) { bulkNames.last() }
+                        } else {
+                            pendingName = ""
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .padding(horizontal = 12.dp),
+                    label = { Text("Stop names list (one per line)") },
+                    placeholder = {
+                        Text(
+                            "Daffodil Smart City\nKumkumari\nCharabag\nKolma"
+                        )
+                    },
+                    maxLines = 100
+                )
+                OutlinedTextField(
+                    value = bulkLatLngText,
+                    onValueChange = { bulkLatLngText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .padding(horizontal = 12.dp),
+                    label = { Text("Stop lat,lng list (serial, one per line)") },
+                    placeholder = {
+                        Text(
+                            "23.8749776,90.3228843\n23.88240205790201,90.3100423395869\n23.885947119640388,90.3108975886436"
+                        )
+                    },
+                    maxLines = 100
+                )
+
+                if (bulkNames.isNotEmpty()) {
+                    val selectedName = bulkNames.getOrElse(selectedNameIndex) { bulkNames.last() }
+                    pendingName = selectedName
+                    val existingSelectedStopIndex = stops.indexOfFirst { it.first.equals(selectedName, ignoreCase = true) }
+                    if (existingSelectedStopIndex >= 0) {
+                        selectedIndex = existingSelectedStopIndex
+                        val existingPoint = stops[existingSelectedStopIndex].second
+                        manualLatLngText = "${existingPoint.latitude},${existingPoint.longitude}"
+                    } else if (selectedIndex < 0) {
+                        manualLatLngText = ""
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                if (selectedNameIndex > 0) {
+                                    selectedNameIndex -= 1
+                                    pendingName = bulkNames.getOrElse(selectedNameIndex) { "" }
+                                }
+                            }
+                        ) {
+                            Text("Prev")
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            tonalElevation = 1.dp,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                                Text(
+                                    text = "Selected stop name",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "${selectedNameIndex + 1}. $selectedName",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                if (selectedNameIndex < bulkNames.lastIndex) {
+                                    selectedNameIndex += 1
+                                    pendingName = bulkNames.getOrElse(selectedNameIndex) { "" }
+                                }
+                            }
+                        ) {
+                            Text("Next")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val parsedPoints = parseBulkGeoPoints(bulkLatLngText)
+                                if (parsedPoints.isEmpty()) {
+                                    Toast.makeText(context, "Lat,lng list empty or invalid", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val limit = minOf(bulkNames.size, parsedPoints.size)
+                                    repeat(limit) { index ->
+                                        val name = bulkNames[index]
+                                        val point = parsedPoints[index]
+                                        val existingIndex = stops.indexOfFirst { it.first.equals(name, ignoreCase = true) }
+                                        if (existingIndex >= 0) {
+                                            stops[existingIndex] = name to point
+                                        } else {
+                                            stops.add(name to point)
+                                        }
+                                    }
+                                    if (limit < bulkNames.size) {
+                                        Toast.makeText(context, "Sob stop-er lat,lng den nai. $limit ta apply hoyeche", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        Toast.makeText(context, "Serially sob stop set hoyeche", Toast.LENGTH_SHORT).show()
+                                    }
+                                    selectedNameIndex = 0
+                                    pendingName = bulkNames.firstOrNull().orEmpty()
+                                    selectedIndex = stops.indexOfFirst { it.first.equals(pendingName, ignoreCase = true) }
+                                    manualLatLngText = stops.getOrNull(selectedIndex)?.second?.let { "${it.latitude},${it.longitude}" }.orEmpty()
+                                    refreshTick++
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Apply All Serial Lat,Lng")
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = manualLatLngText,
+                        onValueChange = { manualLatLngText = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        label = { Text("Selected stop lat,lng") },
+                        placeholder = { Text("23.8749776,90.3228843") },
+                        singleLine = true
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val point = parseManualGeoPoint(manualLatLngText)
+                                if (point == null) {
+                                    Toast.makeText(context, "Invalid lat,lng", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val name = pendingName.trim()
+                                    if (name.isBlank()) {
+                                        Toast.makeText(context, "Stop name din", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        val existingIndex = stops.indexOfFirst { it.first.equals(name, ignoreCase = true) }
+                                        if (existingIndex >= 0) {
+                                            stops[existingIndex] = name to point
+                                            selectedIndex = existingIndex
+                                        } else {
+                                            stops.add(name to point)
+                                            selectedIndex = stops.lastIndex
+                                        }
+
+                                        val currentBulkNames = stopNamesBulkText
+                                            .replace("\r", "\n")
+                                            .lineSequence()
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                            .toList()
+
+                                        val orderedPoints = currentBulkNames.mapNotNull { stopName ->
+                                            stops.firstOrNull { it.first.equals(stopName, ignoreCase = true) }?.second
+                                        }
+                                        bulkLatLngText = orderedPoints.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                        refreshTick++
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Set by Lat,Lng")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val selectedPoint = stops.getOrNull(selectedIndex)?.second
+                                manualLatLngText = selectedPoint?.let { "${it.latitude},${it.longitude}" }.orEmpty()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Use Selected")
+                        }
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = pendingName,
+                        onValueChange = { pendingName = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        label = { Text("Single stop name") },
+                        placeholder = { Text("Daffodil Smart City") },
+                        singleLine = true
+                    )
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = true)
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    tonalElevation = 2.dp,
+                    shadowElevation = 2.dp
+                ) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            Configuration.getInstance().load(ctx, ctx.getSharedPreferences("osmdroid", android.content.Context.MODE_PRIVATE))
+                            MapView(ctx).apply {
+                                setTileSource(TileSourceFactory.MAPNIK)
+                                setMultiTouchControls(true)
+                                controller.setZoom(11.5)
+                                controller.setCenter(
+                                    stops.firstOrNull()?.second ?: GeoPoint(23.8103, 90.4125)
+                                )
+                            }
+                        },
+                        update = { mapView ->
+                            refreshTick
+                            mapView.overlays.clear()
+
+                            val mapEvents = MapEventsOverlay(object : MapEventsReceiver {
+                                override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                                    val point = p ?: return true
+                                    if (pendingName.isBlank() && selectedIndex < 0) {
+                                        Toast.makeText(context, "Stop name din", Toast.LENGTH_SHORT).show()
+                                        return true
+                                    }
+
+                                    if (selectedIndex >= 0 && selectedIndex < stops.size && stops[selectedIndex].first.equals(pendingName.trim(), ignoreCase = true)) {
+                                        val name = pendingName.trim().ifBlank { stops[selectedIndex].first }
+                                        stops[selectedIndex] = name to point
+                                        pendingName = name
+                                        manualLatLngText = "${point.latitude},${point.longitude}"
+
+                                        val currentBulkNames = stopNamesBulkText
+                                            .replace("\r", "\n")
+                                            .lineSequence()
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                            .toList()
+                                        val orderedPoints = currentBulkNames.mapNotNull { stopName ->
+                                            stops.firstOrNull { it.first.equals(stopName, ignoreCase = true) }?.second
+                                        }
+                                        bulkLatLngText = orderedPoints.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                    } else {
+                                        val name = pendingName.trim()
+                                        if (name.isBlank()) {
+                                            Toast.makeText(context, "Stop name din", Toast.LENGTH_SHORT).show()
+                                            return true
+                                        }
+                                        val existingIndex = stops.indexOfFirst { it.first.equals(name, ignoreCase = true) }
+                                        if (existingIndex >= 0) {
+                                            stops[existingIndex] = name to point
+                                            selectedIndex = existingIndex
+                                        } else {
+                                            stops.add(name to point)
+                                            selectedIndex = stops.lastIndex
+                                        }
+                                        manualLatLngText = "${point.latitude},${point.longitude}"
+
+                                        val currentBulkNames = stopNamesBulkText
+                                            .replace("\r", "\n")
+                                            .lineSequence()
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                            .toList()
+                                        val orderedPoints = currentBulkNames.mapNotNull { stopName ->
+                                            stops.firstOrNull { it.first.equals(stopName, ignoreCase = true) }?.second
+                                        }
+                                        bulkLatLngText = orderedPoints.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                        val bulkNamesNow = stopNamesBulkText
+                                            .replace("\r", "\n")
+                                            .lineSequence()
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                            .toList()
+                                        if (bulkNamesNow.isNotEmpty() && selectedNameIndex < bulkNamesNow.lastIndex) {
+                                            selectedNameIndex += 1
+                                            pendingName = bulkNamesNow.getOrElse(selectedNameIndex) { pendingName }
+                                        }
+                                    }
+                                    refreshTick++
+                                    return true
+                                }
+
+                                override fun longPressHelper(p: GeoPoint?): Boolean = false
+                            })
+                            mapView.overlays.add(mapEvents)
+
+
+                            stops.forEachIndexed { index, pair ->
+                                val isCurrentSelectedName = pair.first.equals(pendingName.trim(), ignoreCase = true)
+                                val markerBitmap = android.graphics.Bitmap.createBitmap(
+                                    52,
+                                    52,
+                                    android.graphics.Bitmap.Config.ARGB_8888
+                                )
+                                val markerCanvas = android.graphics.Canvas(markerBitmap)
+                                val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                                    color = if (isCurrentSelectedName) AndroidColor.parseColor("#F59E0B") else AndroidColor.parseColor("#16A34A")
+                                    style = android.graphics.Paint.Style.FILL
+                                }
+                                val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                                    color = AndroidColor.WHITE
+                                    textAlign = android.graphics.Paint.Align.CENTER
+                                    textSize = 24f
+                                    typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+                                }
+                                markerCanvas.drawCircle(26f, 26f, 22f, fillPaint)
+                                val textY = 26f - ((textPaint.descent() + textPaint.ascent()) / 2f)
+                                markerCanvas.drawText((index + 1).toString(), 26f, textY, textPaint)
+                                val numberedIcon = android.graphics.drawable.BitmapDrawable(mapView.context.resources, markerBitmap)
+
+                                val marker = Marker(mapView).apply {
+                                    position = pair.second
+                                    title = pair.first
+                                    subDescription = if (isCurrentSelectedName) "Currently selected stop" else "Stop ${index + 1}"
+                                    icon = numberedIcon
+                                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                    setOnMarkerClickListener { mk, _ ->
+                                        selectedIndex = index
+                                        pendingName = pair.first
+                                        selectedNameIndex = bulkNames.indexOfFirst { it.equals(pair.first, ignoreCase = true) }.takeIf { it >= 0 } ?: selectedNameIndex
+                                        manualLatLngText = "${pair.second.latitude},${pair.second.longitude}"
+                                        val currentBulkNames = stopNamesBulkText
+                                            .replace("\r", "\n")
+                                            .lineSequence()
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                            .toList()
+                                        val orderedPoints = currentBulkNames.mapNotNull { stopName ->
+                                            stops.firstOrNull { it.first.equals(stopName, ignoreCase = true) }?.second
+                                        }
+                                        bulkLatLngText = orderedPoints.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                        mk.showInfoWindow()
+                                        true
+                                    }
+                                }
+                                mapView.overlays.add(marker)
+                            }
+
+                            if (stops.isNotEmpty()) {
+                                val pts = stops.map { it.second }
+                                val minLat = pts.minOf { it.latitude }
+                                val maxLat = pts.maxOf { it.latitude }
+                                val minLng = pts.minOf { it.longitude }
+                                val maxLng = pts.maxOf { it.longitude }
+                                if (pts.size == 1) {
+                                    mapView.controller.setCenter(pts.first())
+                                    mapView.controller.setZoom(15.0)
+                                } else {
+                                    mapView.zoomToBoundingBox(
+                                        BoundingBox(maxLat, maxLng, minLat, minLng),
+                                        true,
+                                        120
+                                    )
+                                }
+                            }
+                            mapView.invalidate()
+                        }
+                    )
+                }
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (selectedIndex >= 0 && selectedIndex < stops.size) {
+                                stops.removeAt(selectedIndex)
+                                selectedIndex = -1
+                                val bulkNamesNow = stopNamesBulkText
+                                    .replace("\r", "\n")
+                                    .lineSequence()
+                                    .map { it.trim() }
+                                    .filter { it.isNotBlank() }
+                                    .toList()
+                                pendingName = bulkNamesNow.getOrElse(selectedNameIndex) { "" }
+                                manualLatLngText = ""
+                                val orderedPoints = bulkNamesNow.mapNotNull { stopName ->
+                                    stops.firstOrNull { it.first.equals(stopName, ignoreCase = true) }?.second
+                                }
+                                bulkLatLngText = orderedPoints.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                refreshTick++
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Delete Selected")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            stops.clear()
+                            selectedIndex = -1
+                            val bulkNamesNow = stopNamesBulkText
+                                .replace("\r", "\n")
+                                .lineSequence()
+                                .map { it.trim() }
+                                .filter { it.isNotBlank() }
+                                .toList()
+                            selectedNameIndex = 0
+                            pendingName = bulkNamesNow.firstOrNull().orEmpty()
+                            manualLatLngText = ""
+                            bulkLatLngText = ""
+                            refreshTick++
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Clear All")
+                    }
+                }
+            }
+        }
     }
+}
 
-    fun clearAllPoints() {
-        editorText = ""
-        stopNamesText = ""
-        pointCount = 0
+@Composable
+private fun SeparateRoadMapEditorDialog(
+    initialRoadRaw: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val points: MutableList<GeoPoint> = remember(initialRoadRaw) { parseRoadOnlyEditorInputForDialog(initialRoadRaw) }
+    var roadBulkText by remember {
+        mutableStateOf(
+            points.joinToString("\n") { "${it.latitude},${it.longitude}" }
+        )
     }
-    fun parseSearchGeoPoint(raw: String): GeoPoint? {
-        val cleaned = raw.trim()
-        if (cleaned.isBlank()) return null
+    var selectedIndex by remember { mutableStateOf(-1) }
+    var selectedInsertAfterIndex by remember { mutableIntStateOf(-1) }
+    var roadInsertMode by remember { mutableStateOf(false) }
+    var manualLatLngText by remember { mutableStateOf("") }
+    var refreshTick by remember { mutableStateOf(0) }
 
-        val parts = cleaned
-            .removePrefix("(")
-            .removeSuffix(")")
-            .split(",")
-            .map { it.trim() }
-
+    fun parseManualGeoPoint(raw: String): GeoPoint? {
+        val cleaned = raw.trim().removePrefix("(").removeSuffix(")")
+        val parts = cleaned.split(",").map { it.trim() }
         if (parts.size < 2) return null
-
         val lat = parts[0].toDoubleOrNull() ?: return null
         val lng = parts[1].toDoubleOrNull() ?: return null
-
         if (lat !in -90.0..90.0 || lng !in -180.0..180.0) return null
-
         return GeoPoint(lat, lng)
     }
 
-    fun parsedStopNames(text: String): List<String> {
-        return text
+    fun parseBulkRoadPoints(raw: String): List<GeoPoint> {
+        return raw
             .replace("\r", "\n")
-            .replace("<>", "\n")
             .replace(";", "\n")
             .lineSequence()
             .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .mapNotNull { parseManualGeoPoint(it) }
             .toList()
     }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-        confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    onApply(editorText.trim(), stopNamesText.trim())
-                }) {
-                    Text("Apply Points")
-                }
-                Button(onClick = {
-                    onSaveDirect(editorText.trim(), stopNamesText.trim())
-                }) {
-                    Text("Save Route")
-                }
-            }
-        },
-        dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { clearAllPoints() }) {
-                    Text("Clear")
-                }
-                TextButton(onClick = {
-                    onCloseWithState(editorText.trim(), stopNamesText.trim())
-                }) {
-                    Text("Close")
-                }
-            }
-        },
-        title = { Text("In-App Route Map Editor") },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    "Road-following upload er jonno serial order-e road-er upor point din. Turn-er age 1ta, turn-e 1ta, turn-er pore 1ta point din. Junction, flyover entry/exit, service road split-e extra point din jate save korar shomoy road polyline thik moto generate hoy.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                OutlinedTextField(
-                    value = searchCoordinateText,
-                    onValueChange = {
-                        searchCoordinateText = it
-                        if (mapSearchError.isNotBlank()) mapSearchError = ""
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Search / jump to lat,lng") },
-                    placeholder = { Text("23.876485958980464, 90.3220170944533") },
-                    singleLine = true,
-                    supportingText = {
-                        if (mapSearchError.isNotBlank()) {
-                            Text(mapSearchError)
-                        } else {
-                            Text("Comma diye latitude, longitude din. Example: (23.876485958980464, 90.3220170944533)")
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Road Map Editor",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(onClick = onDismiss) { Text("Close") }
+                    Button(
+                        onClick = {
+                            val out = points.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                            onSave(out)
                         }
-                    }
+                    ) { Text("Save") }
+                }
+
+                Text(
+                    text = "Full road-er lat,lng list dile niche Apply All dile oi pura list map e polyline hisebe show hobe. Chaile map e tap kore individual point o add/edit korte parben.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                OutlinedTextField(
+                    value = roadBulkText,
+                    onValueChange = { roadBulkText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .padding(horizontal = 12.dp),
+                    label = { Text("Full road lat,lng list") },
+                    placeholder = {
+                        Text(
+                            "23.8749776,90.3228843\n23.8751200,90.3221100\n23.8754305,90.2874124"
+                        )
+                    },
+                    maxLines = 100
+                )
+
+                OutlinedTextField(
+                    value = manualLatLngText,
+                    onValueChange = { manualLatLngText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    label = { Text("Selected road point lat,lng") },
+                    placeholder = { Text("23.8749776,90.3228843") },
+                    singleLine = true
                 )
 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
+                    Button(
                         onClick = {
-                            val target = parseSearchGeoPoint(searchCoordinateText)
-                            if (target != null) {
-                                mapJumpTarget = target
-                                searchedMarkerPoint = target
-                                mapSearchError = ""
+                            val parsed = parseBulkRoadPoints(roadBulkText)
+                            if (parsed.isEmpty()) {
+                                Toast.makeText(context, "Road lat,lng list empty or invalid", Toast.LENGTH_SHORT).show()
                             } else {
-                                mapSearchError = "Invalid format. Use: lat,lng"
+                                points.clear()
+                                points.addAll(parsed)
+                                selectedIndex = if (points.isNotEmpty()) 0 else -1
+                                selectedInsertAfterIndex = selectedIndex
+                                roadInsertMode = false
+                                manualLatLngText = points.firstOrNull()?.let { "${it.latitude},${it.longitude}" }.orEmpty()
+                                refreshTick++
                             }
                         },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Go To Point")
+                        Text("Apply All Road Points")
                     }
 
                     OutlinedButton(
                         onClick = {
-                            searchCoordinateText = ""
-                            searchedMarkerPoint = null
-                            mapSearchError = ""
+                            val point = parseManualGeoPoint(manualLatLngText)
+                            if (point == null) {
+                                Toast.makeText(context, "Invalid lat,lng", Toast.LENGTH_SHORT).show()
+                            } else {
+                                val appliedIndex = if (roadInsertMode) {
+                                    val insertIndex = if (selectedInsertAfterIndex in points.indices) {
+                                        selectedInsertAfterIndex + 1
+                                    } else {
+                                        points.size
+                                    }
+                                    points.add(insertIndex, point)
+                                    insertIndex
+                                } else if (selectedIndex >= 0 && selectedIndex < points.size) {
+                                    points[selectedIndex] = point
+                                    selectedIndex
+                                } else {
+                                    points.add(point)
+                                    points.lastIndex
+                                }
+
+                                selectedIndex = appliedIndex
+                                selectedInsertAfterIndex = appliedIndex
+                                roadInsertMode = false
+                                manualLatLngText = "${point.latitude},${point.longitude}"
+                                roadBulkText = points.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                refreshTick++
+                            }
                         },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Clear Search")
+                        Text("Set Selected")
                     }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                OutlinedButton(
+                    onClick = {
+                        roadInsertMode = true
+                        if (selectedIndex in points.indices) {
+                            selectedInsertAfterIndex = selectedIndex
+                        }
+                    },
+                    enabled = selectedIndex in points.indices,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
                 ) {
-                    OutlinedButton(
-                        onClick = { undoLastPoint() },
-                        enabled = pointCount > 0,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Undo last point")
-                    }
-                    OutlinedButton(
-                        onClick = { clearAllPoints() },
-                        enabled = pointCount > 0,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Remove all points")
-                    }
+                    Text(
+                        if (roadInsertMode)
+                            "Insert Mode ON: Map tap korlei add hobe"
+                        else
+                            "Enable Insert After Selected Point"
+                    )
                 }
+
+                Text(
+                    text = if (roadInsertMode)
+                        "Insert mode on thakle map a tap korlei selected point er pore notun point add hobe. Baki serial automatically shift hobe."
+                    else
+                        "Prothome kono existing point select koro, tarpor insert mode on kore map a tap kore new point add koro. Chaile manual lat,lng diye Set Selected o korte parba.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
 
                 Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = true)
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
                     shape = RoundedCornerShape(16.dp),
                     tonalElevation = 2.dp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(520.dp)
+                    shadowElevation = 2.dp
                 ) {
-                    ManualRouteLeafletMap(
-                        polylineText = editorText,
-                        useExactDrawnRoad = true,
-                        stopNames = parsedStopNames(stopNamesText),
-                        mapJumpTarget = mapJumpTarget,
-                        searchedMarkerPoint = searchedMarkerPoint,
-                        onJumpHandled = { mapJumpTarget = null },
-                        onPointAdded = { lat, lng ->
-                            val line = String.format(Locale.US, "%.7f,%.7f", lat, lng)
-                            editorText = if (editorText.isBlank()) line else "$editorText\n$line"
-                            pointCount = editorText.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.count()
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            Configuration.getInstance().load(ctx, ctx.getSharedPreferences("osmdroid", android.content.Context.MODE_PRIVATE))
+                            MapView(ctx).apply {
+                                setTileSource(TileSourceFactory.MAPNIK)
+                                setMultiTouchControls(true)
+                                controller.setZoom(12.5)
+                                controller.setCenter(points.firstOrNull() ?: GeoPoint(23.8103, 90.4125))
+                            }
                         },
-                        onReplaceText = { updated ->
-                            editorText = updated
-                            pointCount = editorText.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.count()
-                        },
-                        onMarkerTap = { index ->
-                            val names = stopNamesText
-                                .replace("\r", "\n")
-                                .replace("<>", "\n")
-                                .replace(";", "\n")
-                                .lineSequence()
-                                .map { it.trim() }
-                                .toMutableList()
+                        update = { mapView ->
+                            refreshTick
+                            mapView.overlays.clear()
 
-                            while (names.size <= index) {
-                                names.add("")
+                            val mapEvents = MapEventsOverlay(object : MapEventsReceiver {
+                                override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                                    val point = p ?: return true
+
+                                    if (roadInsertMode) {
+                                        val insertIndex = if (selectedInsertAfterIndex in points.indices) {
+                                            selectedInsertAfterIndex + 1
+                                        } else {
+                                            points.size
+                                        }
+                                        points.add(insertIndex, point)
+                                        selectedIndex = insertIndex
+                                        selectedInsertAfterIndex = insertIndex
+                                        roadInsertMode = false
+                                        manualLatLngText = "${point.latitude},${point.longitude}"
+                                        roadBulkText = points.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                        refreshTick++
+                                        return true
+                                    }
+
+                                    manualLatLngText = "${point.latitude},${point.longitude}"
+                                    if (points.isEmpty()) {
+                                        selectedIndex = -1
+                                        selectedInsertAfterIndex = -1
+                                    }
+                                    refreshTick++
+                                    return true
+                                }
+
+                                override fun longPressHelper(p: GeoPoint?): Boolean = false
+                            })
+                            mapView.overlays.add(mapEvents)
+
+                            val polyline = Polyline().apply {
+                                setPoints(points)
+                                outlinePaint.color = AndroidColor.parseColor("#00BFA5")
+                                outlinePaint.strokeWidth = 5f
+                            }
+                            if (points.size >= 2) mapView.overlays.add(polyline)
+
+                            points.forEachIndexed { index, point ->
+                                val markerBitmap = android.graphics.Bitmap.createBitmap(
+                                    52,
+                                    52,
+                                    android.graphics.Bitmap.Config.ARGB_8888
+                                )
+                                val markerCanvas = android.graphics.Canvas(markerBitmap)
+                                val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                                    color = if (index == selectedIndex) AndroidColor.parseColor("#F59E0B") else AndroidColor.parseColor("#0EA5E9")
+                                    style = android.graphics.Paint.Style.FILL
+                                }
+                                val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                                    color = AndroidColor.WHITE
+                                    textAlign = android.graphics.Paint.Align.CENTER
+                                    textSize = 24f
+                                    typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+                                }
+                                markerCanvas.drawCircle(26f, 26f, 22f, fillPaint)
+                                val textY = 26f - ((textPaint.descent() + textPaint.ascent()) / 2f)
+                                markerCanvas.drawText((index + 1).toString(), 26f, textY, textPaint)
+                                val numberedIcon = android.graphics.drawable.BitmapDrawable(mapView.context.resources, markerBitmap)
+
+                                val marker = Marker(mapView).apply {
+                                    position = point
+                                    title = "Road Point ${index + 1}"
+                                    icon = numberedIcon
+                                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                    setOnMarkerClickListener { mk, _ ->
+                                        selectedIndex = index
+                                        selectedInsertAfterIndex = index
+                                        manualLatLngText = "${point.latitude},${point.longitude}"
+                                        mk.showInfoWindow()
+                                        true
+                                    }
+                                }
+                                mapView.overlays.add(marker)
                             }
 
-                            val current = names[index]
-                            names[index] = if (current.isBlank()) {
-                                "Named Point ${index + 1}"
-                            } else {
-                                current
+                            if (points.isNotEmpty()) {
+                                val minLat = points.minOf { it.latitude }
+                                val maxLat = points.maxOf { it.latitude }
+                                val minLng = points.minOf { it.longitude }
+                                val maxLng = points.maxOf { it.longitude }
+                                if (points.size == 1) {
+                                    mapView.controller.setCenter(points.first())
+                                    mapView.controller.setZoom(15.0)
+                                } else {
+                                    mapView.zoomToBoundingBox(
+                                        BoundingBox(maxLat, maxLng, minLat, minLng),
+                                        true,
+                                        120
+                                    )
+                                }
                             }
-
-                            stopNamesText = names.joinToString("\n")
+                            mapView.invalidate()
                         }
                     )
                 }
-                if (pointCount >= 2 && editorText.isNotBlank()) {
-                    Text(
-                        text = "Accuracy rule: Point 1 → Point 2 → Point 3 serial order maintain korun. Turn-er age, turn-er upor, ar turn-er pore point din. Parallel road, service road, flyover entry/exit thakle gap aro kom rakhun.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
 
-                val visibleNamedCount = parsedStopNames(stopNamesText).count { it.isNotBlank() }
-
-                Text(
-                    text = "Sob point route polyline-r jonno use hobe. Kintu sudhu jei line-gulote name diben, user map-e sudhu oi named point-guloi stop marker hishebe show hobe.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant
                 )
-
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    tonalElevation = 1.dp,
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    OutlinedButton(
+                        onClick = {
+                            if (selectedIndex >= 0 && selectedIndex < points.size) {
+                                points.removeAt(selectedIndex)
+                                if (points.isEmpty()) {
+                                    selectedIndex = -1
+                                    selectedInsertAfterIndex = -1
+                                    manualLatLngText = ""
+                                    roadInsertMode = false
+                                } else {
+                                    selectedIndex = selectedIndex.coerceAtMost(points.lastIndex)
+                                    selectedInsertAfterIndex = selectedIndex.coerceAtLeast(0)
+                                    manualLatLngText = points.getOrNull(selectedIndex)?.let { "${it.latitude},${it.longitude}" }.orEmpty()
+                                }
+                                roadBulkText = points.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                refreshTick++
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Text(
-                            text = "Visible named points: $visibleNamedCount / $pointCount",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = "Green point = named and visible on user map. Blue point = route-only hidden point. Red point = preview issue. Blank line thakle oi point hide thakbe.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text("Delete Selected")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (points.isNotEmpty()) {
+                                points.removeAt(points.lastIndex)
+                                if (points.isEmpty()) {
+                                    selectedIndex = -1
+                                    selectedInsertAfterIndex = -1
+                                    manualLatLngText = ""
+                                    roadInsertMode = false
+                                } else {
+                                    if (selectedIndex !in points.indices) {
+                                        selectedIndex = points.lastIndex
+                                    }
+                                    if (selectedInsertAfterIndex !in points.indices) {
+                                        selectedInsertAfterIndex = points.lastIndex
+                                    }
+                                    manualLatLngText = points.getOrNull(selectedIndex)?.let { "${it.latitude},${it.longitude}" }.orEmpty()
+                                }
+                                roadBulkText = points.joinToString("\n") { "${it.latitude},${it.longitude}" }
+                                refreshTick++
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Undo Last")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            points.clear()
+                            selectedIndex = -1
+                            selectedInsertAfterIndex = -1
+                            manualLatLngText = ""
+                            roadBulkText = ""
+                            roadInsertMode = false
+                            refreshTick++
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Clear All")
                     }
                 }
-
-                OutlinedTextField(
-                    value = stopNamesText,
-                    onValueChange = {
-                        stopNamesText = it
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 110.dp),
-                    label = { Text("Visible stop names by point number (optional)") },
-                    placeholder = {
-                        Text("\nBipail\n\nNabinagar\n\nC&B")
-                    },
-                    supportingText = {
-                        Text("Blank line = hide, name thakle show. Example: Point 1 blank, Point 2 Bipail, Point 3 blank, Point 4 Nabinagar.")
-                    },
-                    minLines = 4
-                )
-
-                OutlinedTextField(
-                    value = editorText,
-                    onValueChange = {
-                        editorText = it
-                        pointCount = editorText.lineSequence().map { line -> line.trim() }.filter { line -> line.isNotBlank() }.count()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 120.dp),
-                    label = { Text("lat,lng points") },
-                    minLines = 5
-                )
             }
         }
-    )
+    }
 }
 
 fun stopNamesToText(names: List<String>): String {
@@ -2620,6 +3268,30 @@ private suspend fun snapPolylineToRoadForAdmin(points: List<GeoPoint>): List<Geo
             )
             return results[0]
         }
+        fun midpoint(a: GeoPoint, b: GeoPoint): GeoPoint {
+            return GeoPoint(
+                (a.latitude + b.latitude) / 2.0,
+                (a.longitude + b.longitude) / 2.0
+            )
+        }
+
+        fun dedupeNearby(pointsIn: List<GeoPoint>, minMeters: Float = 3f): List<GeoPoint> {
+            if (pointsIn.isEmpty()) return emptyList()
+            val out = mutableListOf<GeoPoint>()
+            var last = pointsIn.first()
+            out.add(last)
+            for (i in 1 until pointsIn.size) {
+                val p = pointsIn[i]
+                if (distanceMeters(last, p) >= minMeters) {
+                    out.add(p)
+                    last = p
+                }
+            }
+            if (out.last() != pointsIn.last()) {
+                out.add(pointsIn.last())
+            }
+            return out
+        }
 
         fun simplifyInput(input: List<GeoPoint>): List<GeoPoint> {
             if (input.size <= 2) return input
@@ -2684,28 +3356,44 @@ private suspend fun snapPolylineToRoadForAdmin(points: List<GeoPoint>): List<Geo
         }
 
         fun routeSegment(a: GeoPoint, b: GeoPoint): List<GeoPoint> {
-            return try {
-                val snappedA = snapPointToNearestRoad(a)
-                val snappedB = snapPointToNearestRoad(b)
-                val coords = "${snappedA.longitude},${snappedA.latitude};${snappedB.longitude},${snappedB.latitude}"
-                val url = "https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=geojson&steps=false"
+            fun directRoute(x: GeoPoint, y: GeoPoint): List<GeoPoint> {
+                return try {
+                    val snappedA = snapPointToNearestRoad(x)
+                    val snappedB = snapPointToNearestRoad(y)
+                    val coords = "${snappedA.longitude},${snappedA.latitude};${snappedB.longitude},${snappedB.latitude}"
+                    val url = "https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=geojson&steps=false"
 
-                val json = openJson(url) ?: return emptyList()
-                val routes = json.optJSONArray("routes") ?: return emptyList()
-                if (routes.length() == 0) return emptyList()
+                    val json = openJson(url) ?: return emptyList()
+                    val routes = json.optJSONArray("routes") ?: return emptyList()
+                    if (routes.length() == 0) return emptyList()
 
-                val geometry = routes.getJSONObject(0)
-                    .getJSONObject("geometry")
-                    .getJSONArray("coordinates")
+                    val geometry = routes.getJSONObject(0)
+                        .getJSONObject("geometry")
+                        .getJSONArray("coordinates")
 
-                val snapped = decodeCoords(geometry)
-                if (snapped.size >= 2) snapped else emptyList()
-            } catch (_: Exception) {
-                emptyList()
+                    val snapped = decodeCoords(geometry)
+                    if (snapped.size >= 2) snapped else emptyList()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            }
+
+            val direct = directRoute(a, b)
+            if (direct.size >= 2) return direct
+
+            val mid = midpoint(a, b)
+            val first = directRoute(a, mid)
+            val second = directRoute(mid, b)
+
+            return when {
+                first.size >= 2 && second.size >= 2 -> first + second.drop(1)
+                first.size >= 2 -> first
+                second.size >= 2 -> second
+                else -> emptyList()
             }
         }
 
-        val matchedTrace = matchWholeTrace(points)
+        val matchedTrace = dedupeNearby(matchWholeTrace(points))
         if (matchedTrace.size >= 2) return@withContext matchedTrace
 
         val simplifiedPoints = simplifyInput(points)
@@ -2713,16 +3401,33 @@ private suspend fun snapPolylineToRoadForAdmin(points: List<GeoPoint>): List<Geo
 
         val merged = mutableListOf<GeoPoint>()
         for (i in 0 until simplifiedPoints.lastIndex) {
-            val seg = routeSegment(simplifiedPoints[i], simplifiedPoints[i + 1])
-            if (seg.size < 2) continue
-            if (merged.isEmpty()) {
-                merged.addAll(seg)
+            val start = simplifiedPoints[i]
+            val end = simplifiedPoints[i + 1]
+            val seg = routeSegment(start, end)
+            if (seg.size >= 2) {
+                if (merged.isEmpty()) {
+                    merged.addAll(seg)
+                } else {
+                    merged.addAll(seg.drop(1))
+                }
             } else {
-                merged.addAll(seg.drop(1))
+                val snappedStart = snapPointToNearestRoad(start)
+                val snappedEnd = snapPointToNearestRoad(end)
+                if (merged.isEmpty()) {
+                    merged.add(snappedStart)
+                    merged.add(snappedEnd)
+                } else {
+                    if (distanceMeters(merged.last(), snappedStart) >= 3f) {
+                        merged.add(snappedStart)
+                    }
+                    if (distanceMeters(merged.last(), snappedEnd) >= 3f) {
+                        merged.add(snappedEnd)
+                    }
+                }
             }
         }
 
-        return@withContext if (merged.size >= 2) merged else emptyList()
+        return@withContext dedupeNearby(merged)
     }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -2756,6 +3461,8 @@ private fun ManualRouteLeafletMap(
 
     var displayPoints by remember { mutableStateOf<List<GeoPoint>>(emptyList()) }
     var failedSegmentIndexes by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var hasAutoFitted by remember { mutableStateOf(false) }
+    var lastAutoFitKey by remember { mutableStateOf("") }
 
     fun pointsToText(list: List<GeoPoint>): String {
         return list.joinToString("\n") { p ->
@@ -2776,15 +3483,38 @@ private fun ManualRouteLeafletMap(
                     failedSegmentIndexes = emptyList()
                     displayPoints = snapped
                 } else {
-                    val refinedPoints = insertMidpointsForFailedSegments(anchorPoints, failed)
-                    val refinedSnapped = snapPolylineToRoadForAdmin(refinedPoints)
-                    val refinedFailed = findFailedRoadPreviewSegments(refinedPoints)
+                    val densePoints = buildList {
+                        add(anchorPoints.first())
+                        for (i in 0 until anchorPoints.lastIndex) {
+                            val start = anchorPoints[i]
+                            val end = anchorPoints[i + 1]
+                            add(
+                                GeoPoint(
+                                    start.latitude + (end.latitude - start.latitude) * 0.25,
+                                    start.longitude + (end.longitude - start.longitude) * 0.25
+                                )
+                            )
+                            add(
+                                GeoPoint(
+                                    start.latitude + (end.latitude - start.latitude) * 0.50,
+                                    start.longitude + (end.longitude - start.longitude) * 0.50
+                                )
+                            )
+                            add(
+                                GeoPoint(
+                                    start.latitude + (end.latitude - start.latitude) * 0.75,
+                                    start.longitude + (end.longitude - start.longitude) * 0.75
+                                )
+                            )
+                            add(end)
+                        }
+                    }
 
-                    if (refinedSnapped.size >= 2 && refinedFailed.isEmpty()) {
-                        failedSegmentIndexes = emptyList()
-                        displayPoints = refinedSnapped
-                    } else if (refinedSnapped.size >= 2 && refinedFailed.size < failed.size) {
-                        failedSegmentIndexes = refinedFailed
+                    val refinedSnapped = snapPolylineToRoadForAdmin(densePoints)
+                    val refinedFailed = findFailedRoadPreviewSegments(anchorPoints)
+
+                    if (refinedSnapped.size >= 2) {
+                        failedSegmentIndexes = if (refinedFailed.size < failed.size) refinedFailed else failed
                         displayPoints = refinedSnapped
                     } else {
                         failedSegmentIndexes = failed
@@ -2795,6 +3525,25 @@ private fun ManualRouteLeafletMap(
         } else {
             displayPoints = emptyList()
             failedSegmentIndexes = emptyList()
+        }
+    }
+    LaunchedEffect(anchorPoints, displayPoints, mapJumpTarget, searchedMarkerPoint) {
+        val fitKey = buildString {
+            append(anchorPoints.size)
+            append("|")
+            append(displayPoints.size)
+            append("|")
+            append(mapJumpTarget?.latitude ?: 0.0)
+            append(",")
+            append(mapJumpTarget?.longitude ?: 0.0)
+            append("|")
+            append(searchedMarkerPoint?.latitude ?: 0.0)
+            append(",")
+            append(searchedMarkerPoint?.longitude ?: 0.0)
+        }
+        if (fitKey != lastAutoFitKey) {
+            lastAutoFitKey = fitKey
+            hasAutoFitted = false
         }
     }
 
@@ -2809,7 +3558,15 @@ private fun ManualRouteLeafletMap(
 
             MapView(ctx).apply {
                 setTileSource(TileSourceFactory.MAPNIK)
+
+                // enable pinch zoom
                 setMultiTouchControls(true)
+
+                // show zoom in / zoom out buttons on map
+                setBuiltInZoomControls(true)
+                zoomController.setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.ALWAYS)
+
+                // initial camera
                 controller.setZoom(11.0)
                 controller.setCenter(dhakaCenter)
             }
@@ -2820,6 +3577,7 @@ private fun ManualRouteLeafletMap(
                 if (mapView.zoomLevelDouble < 17.0) {
                     mapView.controller.setZoom(17.0)
                 }
+                hasAutoFitted = true
                 onJumpHandled()
             }
             mapView.overlays.clear()
@@ -2933,17 +3691,21 @@ private fun ManualRouteLeafletMap(
                     mapView.overlays.add(warningMarker)
                 }
 
-                val previewBoundsPoints = if (displayPoints.size >= 2) displayPoints else anchorPoints
-                if (previewBoundsPoints.size == 1) {
-                    mapView.controller.setZoom(15.0)
-                    mapView.controller.setCenter(previewBoundsPoints.first())
-                } else if (previewBoundsPoints.size > 1) {
-                    val minLat = previewBoundsPoints.minOf { it.latitude }
-                    val maxLat = previewBoundsPoints.maxOf { it.latitude }
-                    val minLng = previewBoundsPoints.minOf { it.longitude }
-                    val maxLng = previewBoundsPoints.maxOf { it.longitude }
-                    val box = BoundingBox(maxLat, maxLng, minLat, minLng)
-                    mapView.zoomToBoundingBox(box, true, 120)
+                if (!hasAutoFitted) {
+                    val previewBoundsPoints = if (displayPoints.size >= 2) displayPoints else anchorPoints
+                    if (previewBoundsPoints.size == 1) {
+                        mapView.controller.setZoom(15.0)
+                        mapView.controller.setCenter(previewBoundsPoints.first())
+                        hasAutoFitted = true
+                    } else if (previewBoundsPoints.size > 1) {
+                        val minLat = previewBoundsPoints.minOf { it.latitude }
+                        val maxLat = previewBoundsPoints.maxOf { it.latitude }
+                        val minLng = previewBoundsPoints.minOf { it.longitude }
+                        val maxLng = previewBoundsPoints.maxOf { it.longitude }
+                        val box = BoundingBox(maxLat, maxLng, minLat, minLng)
+                        mapView.zoomToBoundingBox(box, true, 120)
+                        hasAutoFitted = true
+                    }
                 }
             } else {
                 mapView.controller.setZoom(11.0)
