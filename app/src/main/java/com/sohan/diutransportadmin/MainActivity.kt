@@ -2217,7 +2217,7 @@ private fun SeparateStopMapEditorDialog(
                 }
 
                 Text(
-                    text = "Onek gula stop name age thekei boshan. Tarpor selected name choose kore map e tap korle oi naam diye stop add hobe. Existing marker tap kore select kore abar tap korle oi marker update hobe.",
+                    text = "Stop names list",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 12.dp)
