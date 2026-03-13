@@ -2231,6 +2231,9 @@ private fun SeparateStopMapEditorDialog(
                         .filter { it.isNotBlank() }
                         .toList()
                 }
+                val compactEditorMode = bulkNames.isNotEmpty()
+                val topEditorFieldHeight = if (compactEditorMode) 112.dp else 160.dp
+                val mapMinHeight = if (compactEditorMode) 250.dp else 180.dp
 
                 fun parseManualGeoPoint(raw: String): GeoPoint? {
                     val cleaned = raw.trim().removePrefix("(").removeSuffix(")")
@@ -2272,7 +2275,7 @@ private fun SeparateStopMapEditorDialog(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(160.dp)
+                        .height(topEditorFieldHeight)
                         .padding(horizontal = 12.dp),
                     label = { Text("Stop names list (one per line)") },
                     placeholder = {
@@ -2287,7 +2290,7 @@ private fun SeparateStopMapEditorDialog(
                     onValueChange = { bulkLatLngText = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(160.dp)
+                        .height(topEditorFieldHeight)
                         .padding(horizontal = 12.dp),
                     label = { Text("Stop lat,lng list (serial, one per line)") },
                     placeholder = {
@@ -2333,7 +2336,7 @@ private fun SeparateStopMapEditorDialog(
                             tonalElevation = 1.dp,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = if (compactEditorMode) 8.dp else 10.dp)) {
                                 Text(
                                     text = "Selected stop name",
                                     style = MaterialTheme.typography.labelMedium,
@@ -2482,6 +2485,7 @@ private fun SeparateStopMapEditorDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f, fill = true)
+                        .heightIn(min = mapMinHeight)
                         .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
                     shape = RoundedCornerShape(16.dp),
                     tonalElevation = 2.dp,
