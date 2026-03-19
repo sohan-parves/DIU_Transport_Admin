@@ -70,6 +70,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.runtime.mutableIntStateOf
+import com.google.firebase.auth.ktx.auth
+import com.google.firebase.ktx.Firebase
 // (keep only one of each)
 // (imports cleaned up below)
 // Remove duplicate imports
@@ -572,6 +574,8 @@ class MainActivity : ComponentActivity() {
 
 
     private val db by lazy { FirebaseFirestore.getInstance() }
+    private val auth by lazy { Firebase.auth }
+    private val adminAuthReady = mutableStateOf(false)
 
     // Notice publish UI state
     private val noticeTitleState = mutableStateOf("")
@@ -743,6 +747,10 @@ class MainActivity : ComponentActivity() {
                     "Saved separated stop map + road map for $routeNo",
                     Toast.LENGTH_LONG
                 ).show()
+                bumpRouteMapVersion(
+                    message = "Separated route map updated from Admin",
+                    extra = mapOf("routeNo" to routeNo)
+                )
             }
             .addOnFailureListener { e ->
                 isLoading.value = false
@@ -784,6 +792,7 @@ class MainActivity : ComponentActivity() {
         if (USE_EMULATOR) {
             FirebaseFirestore.getInstance().useEmulator(EMULATOR_HOST, EMULATOR_FIRESTORE_PORT)
         }
+        ensureAdminAuth()
 
         // Keep a live view of the last uploaded files (shown in UI)
         db.collection("meta").document("app")
@@ -935,7 +944,35 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+    private fun ensureAdminAuth(onReady: (() -> Unit)? = null) {
+        val current = auth.currentUser
+        if (current != null) {
+            adminAuthReady.value = true
+            onReady?.invoke()
+            return
+        }
 
+        adminAuthReady.value = false
+        status.value = "Connecting admin app…"
+
+        auth.signInAnonymously()
+            .addOnSuccessListener { result ->
+                val uid = result.user?.uid.orEmpty()
+                adminAuthReady.value = true
+                status.value = if (uid.isNotBlank()) {
+                    "Admin connected ✅ UID: $uid"
+                } else {
+                    "Admin connected ✅"
+                }
+                android.util.Log.d("ADMIN_AUTH", "Anonymous admin UID=$uid")
+                onReady?.invoke()
+            }
+            .addOnFailureListener { e ->
+                adminAuthReady.value = false
+                status.value = "FAILED ❌ Admin auth failed: ${e.message}"
+                android.util.Log.e("ADMIN_AUTH", "Anonymous admin sign-in failed", e)
+            }
+    }
 
     // ---------------- UI Actions ----------------
 
@@ -943,7 +980,6 @@ class MainActivity : ComponentActivity() {
         val title = noticeTitleState.value.trim().ifBlank { "Transport Notice" }
         val body = noticeBodyState.value.trim()
 
-        // Release date: optional yyyy-MM-dd from UI; if blank/invalid, use today
         val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
         val releaseDateStr = noticeDateState.value.trim()
         val releaseDateMs = try {
@@ -962,73 +998,75 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        isLoading.value = true
-        status.value = "Publishing notice…"
+        ensureAdminAuth {
+            isLoading.value = true
+            status.value = "Publishing notice…"
 
-        // Keep notices for 14 days, then allow cleanup
-        val nowMs = System.currentTimeMillis()
-        val expiresMs = nowMs + TimeUnit.DAYS.toMillis(14)
+            val nowMs = System.currentTimeMillis()
+            val expiresMs = nowMs + TimeUnit.DAYS.toMillis(14)
 
-        val doc = hashMapOf<String, Any>(
-            "title" to title,
-            "body" to body,
-            "releaseDate" to releaseDateFinalStr,          // yyyy-MM-dd
-            "releaseDateMs" to releaseDateMs,              // epoch ms
-            "createdAt" to FieldValue.serverTimestamp(),
-            "createdAtMs" to nowMs,
-            "expiresAt" to Timestamp(expiresMs / 1000, ((expiresMs % 1000) * 1_000_000).toInt())
-        )
+            val doc = hashMapOf<String, Any>(
+                "title" to title,
+                "body" to body,
+                "releaseDate" to releaseDateFinalStr,
+                "releaseDateMs" to releaseDateMs,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "createdAtMs" to nowMs,
+                "expiresAt" to Timestamp(expiresMs / 1000, ((expiresMs % 1000) * 1_000_000).toInt())
+            )
 
-        db.collection("notices").document()
-            .set(doc)
-            .addOnSuccessListener {
-                noticeTitleState.value = ""
-                noticeBodyState.value = ""
-                noticeDateState.value = ""
-
-                isLoading.value = false
-                status.value = "DONE ✅ Notice published"
-            }
-            .addOnFailureListener { e ->
-                isLoading.value = false
-                status.value = "FAILED ❌ ${e.message}"
-            }
+            db.collection("notices").document()
+                .set(doc)
+                .addOnSuccessListener {
+                    noticeTitleState.value = ""
+                    noticeBodyState.value = ""
+                    noticeDateState.value = ""
+                    isLoading.value = false
+                    status.value = "DONE ✅ Notice published"
+                }
+                .addOnFailureListener { e ->
+                    isLoading.value = false
+                    status.value = "FAILED ❌ ${e.message}"
+                }
+        }
     }
 
     // Manual cleanup: delete notices that expired (older than 14 days)
     // NOTE: For automatic cleanup every ~4 months, use a Cloud Scheduler + Cloud Function.
     private fun cleanupOldNotices() {
-        isLoading.value = true
-        status.value = "Cleaning old notices…"
+        ensureAdminAuth {
+            isLoading.value = true
+            status.value = "Cleaning old notices…"
 
-        val cutoffMs = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(14)
+            val cutoffMs = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(14)
 
-        db.collection("notices")
-            .whereLessThan("createdAtMs", cutoffMs)
-            .get()
-            .addOnSuccessListener { snap ->
-                if (snap.isEmpty) {
-                    isLoading.value = false
-                    status.value = "DONE ✅ No old notices to delete"
-                    return@addOnSuccessListener
-                }
-
-                db.runBatch { batch ->
-                    for (d in snap.documents) {
-                        batch.delete(d.reference)
+            db.collection("notices")
+                .whereLessThan("createdAtMs", cutoffMs)
+                .get()
+                .addOnSuccessListener { snap ->
+                    if (snap.isEmpty) {
+                        isLoading.value = false
+                        status.value = "DONE ✅ No old notices to delete"
+                        return@addOnSuccessListener
                     }
-                }.addOnSuccessListener {
-                    isLoading.value = false
-                    status.value = "DONE ✅ Deleted ${snap.size()} old notice(s)"
-                }.addOnFailureListener { e ->
+
+                    db.runBatch { batch ->
+                        for (d in snap.documents) {
+                            batch.delete(d.reference)
+                        }
+                    }.addOnSuccessListener {
+                        isLoading.value = false
+                        status.value = "DONE ✅ Deleted ${snap.size()} old notice(s)"
+                    }.addOnFailureListener { e ->
+                        isLoading.value = false
+                        status.value = "FAILED ❌ ${e.message}"
+                    }
+                }
+                .addOnFailureListener { e ->
                     isLoading.value = false
                     status.value = "FAILED ❌ ${e.message}"
                 }
-            }
-            .addOnFailureListener { e ->
-                isLoading.value = false
-                status.value = "FAILED ❌ ${e.message}"
-            }
+        }
     }
     private suspend fun snapPolylineToRoadForAdmin(points: List<GeoPoint>): List<GeoPoint> =
         withContext(Dispatchers.IO) {
@@ -1321,71 +1359,93 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun uploadSchedule(items: List<Map<String, Any>>, fileNames: List<String>) {
-        status.value = "Uploading ${items.size} routes..."
-        Toast.makeText(
-            this@MainActivity,
-            "Uploading ${items.size} routes…",
-            Toast.LENGTH_SHORT
-        ).show()
-
-        val scheduleRef = db.collection("schedules")
-            .document("current")
-            .collection("data")
-            .document("items")
-
-        val metaRef = db.collection("meta").document("app")
-
-        db.runBatch { batch ->
-            batch.set(
-                scheduleRef,
-                mapOf(
-                    "items" to items,
-                    "sourceFiles" to fileNames,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
-
-            batch.set(
-                metaRef,
-                mapOf(
-                    "version" to FieldValue.increment(1),
-                    "message" to "Schedule updated from Admin",
-                    "lastUploadedFiles" to fileNames,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                ),
-                SetOptions.merge()
-            )
-
-            val msgRef = db.collection("admin_messages").document()
-            batch.set(
-                msgRef,
-                mapOf(
-                    "title" to "DIU Transport Schedule",
-                    "body" to "Schedule updated from Admin",
-                    "target" to "diu_admin",
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
-        }.addOnSuccessListener {
-            isLoading.value = false
-            status.value = "DONE ✅ Uploaded ${items.size} route(s). Schedule fully replaced. Separate map collection was not touched."
-            progressPercent.value = 0
-            progressLabel.value = ""
+        ensureAdminAuth {
+            status.value = "Uploading ${items.size} routes..."
             Toast.makeText(
                 this@MainActivity,
-                "DONE ✅ Uploaded ${items.size} route(s)\nSchedule fully replaced. Separate map collection unchanged.",
-                Toast.LENGTH_LONG
+                "Uploading ${items.size} routes…",
+                Toast.LENGTH_SHORT
             ).show()
-        }.addOnFailureListener { e ->
-            isLoading.value = false
-            status.value = "FAILED ❌ ${e.message}"
-            progressPercent.value = 0
-            progressLabel.value = ""
-            Toast.makeText(
-                this@MainActivity,
-                "FAILED ❌ Upload failed: ${e.message}",
-                Toast.LENGTH_LONG
-            ).show()
+
+            val scheduleRef = db.collection("schedules")
+                .document("current")
+                .collection("data")
+                .document("items")
+
+            val metaRef = db.collection("meta").document("app")
+
+            db.runBatch { batch ->
+                batch.set(
+                    scheduleRef,
+                    mapOf(
+                        "items" to items,
+                        "sourceFiles" to fileNames,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+
+                batch.set(
+                    metaRef,
+                    mapOf(
+                        "version" to FieldValue.increment(1),
+                        "message" to "Schedule updated from Admin",
+                        "lastUploadedFiles" to fileNames,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+
+                val msgRef = db.collection("admin_messages").document()
+                batch.set(
+                    msgRef,
+                    mapOf(
+                        "title" to "DIU Transport Schedule",
+                        "body" to "Schedule updated from Admin",
+                        "target" to "diu_admin",
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }.addOnSuccessListener {
+                isLoading.value = false
+                status.value = "DONE ✅ Uploaded ${items.size} route(s). Schedule fully replaced. Map version unchanged."
+                progressPercent.value = 0
+                progressLabel.value = ""
+                Toast.makeText(
+                    this@MainActivity,
+                    "DONE ✅ Uploaded ${items.size} route(s)\nSchedule fully replaced. Map version unchanged.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }.addOnFailureListener { e ->
+                isLoading.value = false
+                status.value = "FAILED ❌ ${e.message}"
+                progressPercent.value = 0
+                progressLabel.value = ""
+                Toast.makeText(
+                    this@MainActivity,
+                    "FAILED ❌ Upload failed: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+    private fun bumpRouteMapVersion(
+        message: String = "Route map updated from Admin",
+        extra: Map<String, Any> = emptyMap(),
+        onDone: (() -> Unit)? = null
+    ) {
+        ensureAdminAuth {
+            val routeMapMetaRef = db.collection("meta").document("route_maps")
+            val payload = hashMapOf<String, Any>(
+                "version" to FieldValue.increment(1),
+                "message" to message,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            payload.putAll(extra)
+
+            routeMapMetaRef
+                .set(payload, SetOptions.merge())
+                .addOnSuccessListener { onDone?.invoke() }
+                .addOnFailureListener { onDone?.invoke() }
         }
     }
 
@@ -1404,41 +1464,41 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        isLoading.value = true
-        status.value = "Sending notification…"
+        ensureAdminAuth {
+            isLoading.value = true
+            status.value = "Sending notification…"
 
-        val msgRef = db.collection("admin_messages").document()
-        val metaRef = db.collection("meta").document("app")
+            val msgRef = db.collection("admin_messages").document()
+            val metaRef = db.collection("meta").document("app")
 
-        val msgDoc = hashMapOf<String, Any>(
-            "title" to cleanTitle,
-            "body" to cleanBody,
-            "target" to cleanTarget,
-            "createdAt" to FieldValue.serverTimestamp()
-        )
-
-        db.runBatch { batch ->
-            // Create a new admin message document (Cloud Function can trigger on this)
-            batch.set(msgRef, msgDoc)
-
-            // Keep existing meta/app behavior (used by the user app to refresh)
-            val metaUpdates = hashMapOf<String, Any>(
-                "message" to cleanBody,
-                "updatedAt" to FieldValue.serverTimestamp()
+            val msgDoc = hashMapOf<String, Any>(
+                "title" to cleanTitle,
+                "body" to cleanBody,
+                "target" to cleanTarget,
+                "createdAt" to FieldValue.serverTimestamp()
             )
-            if (incrementVersion) {
-                metaUpdates["version"] = FieldValue.increment(1)
+
+            db.runBatch { batch ->
+                batch.set(msgRef, msgDoc)
+
+                val metaUpdates = hashMapOf<String, Any>(
+                    "message" to cleanBody,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                if (incrementVersion) {
+                    metaUpdates["version"] = FieldValue.increment(1)
+                }
+                batch.set(metaRef, metaUpdates, SetOptions.merge())
+            }.addOnSuccessListener {
+                isLoading.value = false
+                status.value = if (incrementVersion)
+                    "DONE ✅ Notification queued + version incremented"
+                else
+                    "DONE ✅ Notification queued"
+            }.addOnFailureListener { e ->
+                isLoading.value = false
+                status.value = "FAILED ❌ ${e.message}"
             }
-            batch.set(metaRef, metaUpdates, SetOptions.merge())
-        }.addOnSuccessListener {
-            isLoading.value = false
-            status.value = if (incrementVersion)
-                "DONE ✅ Notification queued + version incremented"
-            else
-                "DONE ✅ Notification queued"
-        }.addOnFailureListener { e ->
-            isLoading.value = false
-            status.value = "FAILED ❌ ${e.message}"
         }
     }
 

@@ -13,8 +13,8 @@ android {
         applicationId = "com.sohan.diutransportadmin"
         minSdk = 30
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 6
+        versionName = "1.0.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -78,10 +78,10 @@ dependencies {
     // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-firestore")
+    implementation("com.google.firebase:firebase-auth")
 
     // OCR (Text extraction from images)
     implementation("com.google.mlkit:text-recognition:16.0.1")
-    // Bengali OCR (offline, free)
     implementation("com.rmtheis:tess-two:9.1.0")
 
     // Excel (XLSX) support
